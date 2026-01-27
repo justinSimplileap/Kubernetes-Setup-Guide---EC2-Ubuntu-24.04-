@@ -1,0 +1,101 @@
+Kubernetes Single-Node EC2 Deployment Guide
+1. Prepare EC2 Instance
+
+Launch Ubuntu 24 LTS EC2 instance.
+
+Update packages:
+
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y curl git apt-transport-https ca-certificates
+
+2. Install containerd
+sudo apt install -y containerd
+sudo mkdir -p /etc/containerd
+sudo containerd config default | sudo tee /etc/containerd/config.toml
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+sudo systemctl restart containerd
+sudo systemctl enable containerd
+
+3. Install nerdctl
+curl -LO https://github.com/containerd/nerdctl/releases/download/v1.7.5/nerdctl-1.7.5-linux-amd64.tar.gz
+tar -xvf nerdctl-1.7.5-linux-amd64.tar.gz
+sudo mv nerdctl /usr/local/bin/
+nerdctl --version
+
+4. Install buildkit
+curl -LO https://github.com/moby/buildkit/releases/download/v0.12.5/buildkit-v0.12.5.linux-amd64.tar.gz
+sudo tar -C /usr/local/bin -xzf buildkit-v0.12.5.linux-amd64.tar.gz --strip-components=1 buildkit-v0.12.5.linux-amd64/bin/buildctl buildkit-v0.12.5.linux-amd64/bin/buildkitd
+buildctl --version
+sudo nohup buildkitd > /dev/null 2>&1 &
+
+5. Enable IP Forwarding
+cat /proc/sys/net/ipv4/ip_forward
+sudo sysctl -w net.ipv4.ip_forward=1
+
+6. Disable Swap
+sudo swapoff -a
+sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+
+7. Install Kubernetes Components
+sudo apt update
+sudo apt install -y kubeadm kubelet kubectl
+sudo apt-mark hold kubelet kubeadm kubectl
+
+8. Install pre-requisites
+sudo apt install -y conntrack
+
+9. Initialize Kubernetes
+sudo kubeadm init --pod-network-cidr=192.168.0.0/16
+
+Set up kubeconfig:
+
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+10. Install CNI (Calico)
+kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+
+11. Remove Control-Plane Taint (for single-node)
+kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+
+12. Check Cluster
+kubectl get nodes
+kubectl get pods -A
+
+13. Deploy Your Backend
+
+Generate secrets YAML (temp-secrets.yaml) dynamically in GitHub Actions.
+
+Copy to EC2:
+
+target: "/home/ubuntu/<repo>/.k8s/secrets.yaml"
+
+Build Docker image with nerdctl:
+
+sudo nerdctl --namespace k8s.io build -t tp-live-backend:latest .
+
+Apply Kubernetes manifests:
+
+sudo kubectl apply --kubeconfig=/etc/kubernetes/admin.conf -f .k8s/secrets.yaml
+sudo kubectl apply --kubeconfig=/etc/kubernetes/admin.conf -f .k8s/deployment.yaml
+sudo kubectl apply --kubeconfig=/etc/kubernetes/admin.conf -f .k8s/service.yaml
+
+Restart deployment:
+
+sudo kubectl rollout restart deployment tp-live-backend --kubeconfig=/etc/kubernetes/admin.conf
+
+14. Verify Deployment
+kubectl get pods -A
+kubectl describe pod <pod-name>
+kubectl logs <pod-name>
+
+✅ Notes / Tips
+
+Always disable swap for Kubernetes to schedule pods correctly.
+
+Single-node clusters require the control-plane taint removal.
+
+Use nerdctl for building images directly on the node.
+
+Keep your secrets safe and never hard-code them.
