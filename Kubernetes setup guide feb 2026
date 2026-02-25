@@ -1,0 +1,577 @@
+# Kubernetes Single-Node EC2 Deployment Guide
+
+Complete step-by-step guide for setting up Kubernetes on a single Ubuntu 24 LTS EC2 instance.
+
+**Last Updated:** February 25, 2026
+**Tested on:** Ubuntu 24 LTS, Kubernetes v1.28.15
+
+---
+
+## Prerequisites
+
+- Ubuntu 24 LTS EC2 instance (t3.medium or larger recommended)
+- SSH access to the instance
+- Sufficient disk space (at least 20GB)
+- Security group allowing necessary ports
+
+---
+
+## Step 1: Prepare EC2 Instance
+
+Update system packages and install required tools.
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y curl git apt-transport-https ca-certificates
+```
+
+**Verification:**
+```bash
+curl --version
+git --version
+```
+
+**Expected Output:** Versions of curl and git should be displayed.
+
+---
+
+## Step 2: Install containerd
+
+Install and configure containerd as the container runtime.
+
+```bash
+sudo apt install -y containerd
+sudo mkdir -p /etc/containerd
+sudo containerd config default | sudo tee /etc/containerd/config.toml
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+sudo systemctl restart containerd
+sudo systemctl enable containerd
+```
+
+**Verification:**
+```bash
+sudo systemctl status containerd
+```
+
+**Expected Output:**
+```
+● containerd.service - containerd container runtime
+     Loaded: loaded (...; enabled; preset: enabled)
+     Active: active (running)
+```
+
+---
+
+## Step 3: Install nerdctl
+
+Install nerdctl for building and managing container images with containerd.
+
+```bash
+curl -LO https://github.com/containerd/nerdctl/releases/download/v1.7.5/nerdctl-1.7.5-linux-amd64.tar.gz
+tar -xvf nerdctl-1.7.5-linux-amd64.tar.gz
+sudo mv nerdctl /usr/local/bin/
+nerdctl --version
+```
+
+**Expected Output:**
+```
+nerdctl version 1.7.5
+```
+
+---
+
+## Step 4: Install buildkit
+
+Install buildkit for building container images.
+
+```bash
+curl -LO https://github.com/moby/buildkit/releases/download/v0.12.5/buildkit-v0.12.5.linux-amd64.tar.gz
+sudo tar -C /usr/local/bin -xzf buildkit-v0.12.5.linux-amd64.tar.gz --strip-components=1
+buildctl --version
+```
+
+**Expected Output:**
+```
+buildctl github.com/moby/buildkit v0.12.5 bac3f2b673f3f9d33e79046008e7a38e856b3dc6
+```
+
+**Start buildkitd daemon:**
+```bash
+sudo nohup buildkitd > /dev/null 2>&1 &
+```
+
+---
+
+## Step 5: Enable IP Forwarding
+
+Enable IP forwarding required for Kubernetes networking.
+
+**Check current status:**
+```bash
+cat /proc/sys/net/ipv4/ip_forward
+```
+
+**Enable IP forwarding:**
+```bash
+sudo sysctl -w net.ipv4.ip_forward=1
+```
+
+**Expected Output:**
+```
+net.ipv4.ip_forward = 1
+```
+
+---
+
+## Step 6: Disable Swap
+
+Kubernetes requires swap to be disabled.
+
+```bash
+sudo swapoff -a
+sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+```
+
+**Verification:**
+```bash
+free -h
+```
+
+**Expected Output:** Swap line should show 0B total.
+
+---
+
+## Step 7: Install Kubernetes Components
+
+Add Kubernetes repository and install kubeadm, kubelet, and kubectl.
+
+**Add Kubernetes GPG key:**
+```bash
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+```
+
+**Add Kubernetes repository:**
+```bash
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+```
+
+**Update package list:**
+```bash
+sudo apt update
+```
+
+**Install Kubernetes components:**
+```bash
+sudo apt install -y kubeadm kubelet kubectl
+```
+
+**Hold packages to prevent automatic updates:**
+```bash
+sudo apt-mark hold kubelet kubeadm kubectl
+```
+
+**Verification:**
+```bash
+kubeadm version
+kubelet --version
+kubectl version --client
+```
+
+---
+
+## Step 8: Install Pre-requisites
+
+Install conntrack which is required by Kubernetes.
+
+```bash
+sudo apt install -y conntrack
+```
+
+---
+
+## Step 9: Initialize Kubernetes Cluster
+
+**Load required kernel modules:**
+```bash
+sudo modprobe br_netfilter
+sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
+```
+
+**Initialize the cluster:**
+```bash
+sudo kubeadm init --pod-network-cidr=192.168.0.0/16
+```
+
+This command will take several minutes. Wait for completion.
+
+**Expected Output:** You'll see initialization messages and at the end a token for joining worker nodes (save this if needed).
+
+**Set up kubeconfig for current user:**
+```bash
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+```
+
+**Verification:**
+```bash
+kubectl cluster-info
+```
+
+---
+
+## Step 10: Install CNI (Calico)
+
+Install Calico for pod networking.
+
+```bash
+kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+```
+
+**Wait for Calico pods to be ready:**
+```bash
+kubectl get pods -n kube-system | grep calico
+```
+
+**Expected Output:** All calico pods should show as Running.
+
+---
+
+## Step 11: Remove Control-Plane Taint (Single-Node Only)
+
+For single-node clusters, remove the control-plane taint to allow pods to be scheduled.
+
+```bash
+kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+```
+
+**Expected Output:**
+```
+node/ip-xxx-xxx-xxx-xxx untainted
+```
+
+⚠️ **WARNING:** Only do this for single-node development clusters. Production clusters should have dedicated worker nodes.
+
+---
+
+## Step 12: Verify Cluster Setup
+
+**Check node status:**
+```bash
+kubectl get nodes
+```
+
+**Expected Output:**
+```
+NAME               STATUS   ROLES           AGE   VERSION
+ip-172-31-35-237   Ready    control-plane   2m    v1.28.15
+```
+
+**Check all system pods:**
+```bash
+kubectl get pods -A
+```
+
+**Expected Output:** All pods in kube-system namespace should be Running.
+
+**Check cluster info:**
+```bash
+kubectl cluster-info
+```
+
+---
+
+## Step 13: Deploy Your Backend Application
+
+### 13.1 Prepare Docker Image
+
+Create a Dockerfile in your repository root:
+
+```dockerfile
+FROM node:18-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+EXPOSE 3000
+CMD ["npm", "start"]
+```
+
+### 13.2 Build Docker Image with nerdctl
+
+```bash
+sudo nerdctl --namespace k8s.io build -t your-app-name:latest .
+```
+
+**Verification:**
+```bash
+sudo nerdctl --namespace k8s.io images
+```
+
+### 13.3 Create Kubernetes Manifests
+
+Create `.k8s/secrets.yaml`:
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secrets
+  namespace: default
+type: Opaque
+data:
+  DATABASE_URL: <base64-encoded-db-url>
+  API_KEY: <base64-encoded-api-key>
+```
+
+Create `.k8s/deployment.yaml`:
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tp-live-backend
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tp-live-backend
+  template:
+    metadata:
+      labels:
+        app: tp-live-backend
+    spec:
+      containers:
+      - name: tp-live-backend
+        image: your-app-name:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 3000
+        envFrom:
+        - secretRef:
+            name: app-secrets
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+```
+
+Create `.k8s/service.yaml`:
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: tp-live-backend-service
+  namespace: default
+spec:
+  type: NodePort
+  selector:
+    app: tp-live-backend
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 3000
+    nodePort: 30080
+```
+
+### 13.4 Deploy to Kubernetes
+
+**Apply secrets:**
+```bash
+sudo kubectl apply --kubeconfig=/etc/kubernetes/admin.conf -f .k8s/secrets.yaml
+```
+
+**Apply deployment:**
+```bash
+sudo kubectl apply --kubeconfig=/etc/kubernetes/admin.conf -f .k8s/deployment.yaml
+```
+
+**Apply service:**
+```bash
+sudo kubectl apply --kubeconfig=/etc/kubernetes/admin.conf -f .k8s/service.yaml
+```
+
+### 13.5 Verify Deployment
+
+**Check deployment status:**
+```bash
+kubectl get deployment
+kubectl describe deployment tp-live-backend
+```
+
+**Check pod status:**
+```bash
+kubectl get pods
+kubectl describe pod <pod-name>
+```
+
+**Check service:**
+```bash
+kubectl get service
+```
+
+**View application logs:**
+```bash
+kubectl logs -f deployment/tp-live-backend
+```
+
+### 13.6 Access Your Application
+
+Your application will be accessible at:
+```
+http://<EC2-Instance-Public-IP>:30080
+```
+
+---
+
+## Step 14: Update Deployment
+
+When you need to update your application:
+
+**Build new image:**
+```bash
+sudo nerdctl --namespace k8s.io build -t your-app-name:latest .
+```
+
+**Restart deployment to use new image:**
+```bash
+sudo kubectl rollout restart deployment tp-live-backend --kubeconfig=/etc/kubernetes/admin.conf
+```
+
+**Monitor rollout:**
+```bash
+kubectl rollout status deployment/tp-live-backend
+```
+
+---
+
+## Troubleshooting
+
+### Pods not starting
+
+```bash
+# Check pod status
+kubectl describe pod <pod-name>
+
+# View logs
+kubectl logs <pod-name>
+
+# Check node resources
+kubectl top nodes
+kubectl top pods
+```
+
+### Container image not found
+
+```bash
+# List available images in containerd
+sudo nerdctl --namespace k8s.io images
+
+# Ensure image is built
+sudo nerdctl --namespace k8s.io build -t your-app-name:latest .
+```
+
+### DNS issues
+
+```bash
+# Check CoreDNS pods
+kubectl get pods -n kube-system | grep coredns
+
+# Test DNS
+kubectl run -it --rm debug --image=alpine --restart=Never -- nslookup kubernetes.default
+```
+
+### Network connectivity
+
+```bash
+# Check Calico status
+kubectl get pods -n kube-system | grep calico
+
+# Check node network
+ip route
+```
+
+---
+
+## Common Commands Reference
+
+```bash
+# Cluster information
+kubectl cluster-info
+kubectl get nodes
+kubectl get pods -A
+
+# Deployment management
+kubectl get deployments
+kubectl describe deployment <name>
+kubectl logs <pod-name>
+kubectl exec -it <pod-name> -- /bin/bash
+
+# Scaling
+kubectl scale deployment <name> --replicas=3
+
+# Updates
+kubectl rollout restart deployment <name>
+kubectl rollout status deployment <name>
+
+# Port forwarding (local testing)
+kubectl port-forward svc/<service-name> 8080:3000
+
+# Delete resources
+kubectl delete deployment <name>
+kubectl delete service <name>
+```
+
+---
+
+## Security Best Practices
+
+1. **Never hardcode secrets** in manifests or Dockerfiles
+2. **Use Kubernetes Secrets** for sensitive data
+3. **Restrict network access** via security groups
+4. **Regularly update** Kubernetes and container images
+5. **Use resource limits** to prevent resource exhaustion
+6. **Enable RBAC** for production clusters
+7. **Regular backups** of etcd (especially for production)
+
+---
+
+## Performance Optimization
+
+For production deployments:
+
+1. **Use appropriate node types** (t3.medium minimum)
+2. **Set resource requests and limits** in deployments
+3. **Use horizontal pod autoscaling** for varying loads
+4. **Monitor cluster health** with tools like Prometheus
+5. **Use persistent volumes** for stateful applications
+6. **Implement pod disruption budgets** for resilience
+
+---
+
+## Useful Resources
+
+- [Kubernetes Official Documentation](https://kubernetes.io/docs/)
+- [containerd Documentation](https://containerd.io/)
+- [Calico Networking](https://www.projectcalico.org/)
+- [kubeadm Reference](https://kubernetes.io/docs/reference/setup-tools/kubeadm/)
+
+---
+
+## Notes
+
+- This guide is for **development/testing** purposes
+- Single-node clusters are **not recommended for production**
+- Always test in a staging environment before production deployment
+- Monitor logs and metrics regularly
+- Keep backups of important data and configurations
+
+---
+
+## Changelog
+
+| Date | Version | Changes |
+|------|---------|---------|
+| 2026-02-25 | 1.0 | Initial complete guide |
